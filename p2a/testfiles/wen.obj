@@ -1,0 +1,10 @@
+2 2 2 3
+0x00810003
+0x01800000
+0x00000003
+0x00000002
+LVar D 0
+GVar D 1
+0 lw GVar
+0 .fill GVar
+1 .fill LVar

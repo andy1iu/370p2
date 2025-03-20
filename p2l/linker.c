@@ -55,6 +55,26 @@ struct CombinedFiles {
 	RelocationTableEntry relocTable[MAXSIZE * MAXFILES];
 };
 
+
+//
+// Helper: find symbol in combined symbol table
+// Returns the absolute address if found, or -1 if not found.
+// 
+int findSymbolAddress(CombinedFiles *combined, const char *label) {
+    for (unsigned int i = 0; i < combined->symbolTableSize; i++) {
+        if (!strcmp(combined->symbolTable[i].label, label)) {
+            // If location == 'T', address is text offset
+            // If location == 'D', address is textSize + data offset
+            if (combined->symbolTable[i].location == 'T') {
+                return combined->symbolTable[i].offset; 
+            } else if (combined->symbolTable[i].location == 'D') {
+                return (combined->textSize + combined->symbolTable[i].offset);
+            }
+        }
+    }
+    return -1;
+}
+
 int main(int argc, char *argv[]) {
 	char *inFileStr, *outFileStr;
 	FILE *inFilePtr, *outFilePtr; 
@@ -75,6 +95,8 @@ int main(int argc, char *argv[]) {
 	}
 
 	FileData files[MAXFILES];
+	CombinedFiles combined;
+	memset(&combined, 0, sizeof(CombinedFiles));
 
   // read in all files and combine into a "master" file
 	for (i = 0; i < argc - 2; ++i) {
@@ -147,11 +169,145 @@ int main(int argc, char *argv[]) {
 	// *** INSERT YOUR CODE BELOW ***
 	//    Begin the linking process
 	//    Happy coding!!!
+	// -----------------------------------------------------
+	// 1) Merge the text and data sections in order:
+	//    - We'll record where each file's text & data now starts
+	//    - Then copy them into the combined text[] and data[] arrays
+	// -----------------------------------------------------
+	// 2) Merge text and data sections in the order read
+    unsigned int currentTextStart = 0;
+    unsigned int currentDataStart = 0;
+    for (i = 0; i < (unsigned int)(argc - 2); i++) {
+        files[i].textStartingLine = currentTextStart;
+        files[i].dataStartingLine = currentDataStart;
 
-    /* here is an example of using printHexToFile. This will print a
-       machine code word / number in the proper hex format to the output file */
-    printHexToFile(outFilePtr, 123);
+        // Copy text
+        for (j = 0; j < files[i].textSize; j++) {
+            combined.text[currentTextStart + j] = files[i].text[j];
+        }
+        // Copy data
+        for (j = 0; j < files[i].dataSize; j++) {
+            combined.data[currentDataStart + j] = files[i].data[j];
+        }
 
+        currentTextStart += files[i].textSize;
+        currentDataStart += files[i].dataSize;
+    }
+    combined.textSize = currentTextStart;
+    combined.dataSize = currentDataStart;
+
+    // 3) Build global symbol table (skip 'U')
+    for (i = 0; i < (unsigned int)(argc - 2); i++) {
+        for (j = 0; j < files[i].symbolTableSize; j++) {
+            SymbolTableEntry *sym = &files[i].symbolTable[j];
+            if (sym->location == 'U') {
+                // 'U' means undefined reference => not a definition
+                continue;
+            }
+            // check duplicates
+            for (unsigned int k = 0; k < combined.symbolTableSize; k++) {
+                if (!strcmp(combined.symbolTable[k].label, sym->label)) {
+                    printf("error: duplicate label '%s' found in multiple files\n",
+                           sym->label);
+                    exit(1);
+                }
+            }
+            // no duplicate => add
+            strcpy(combined.symbolTable[combined.symbolTableSize].label, sym->label);
+            combined.symbolTable[combined.symbolTableSize].location = sym->location;
+            if (sym->location == 'T') {
+                combined.symbolTable[combined.symbolTableSize].offset =
+                    files[i].textStartingLine + sym->offset;
+            } 
+            else if (sym->location == 'D') {
+                combined.symbolTable[combined.symbolTableSize].offset =
+                    files[i].dataStartingLine + sym->offset;
+            } 
+            else {
+                // If there's some other letter, assume we keep the offset as is
+                combined.symbolTable[combined.symbolTableSize].offset = sym->offset;
+            }
+            combined.symbolTableSize++;
+        }
+    }
+
+    // 4) Resolve relocation entries in text or data
+    for (i = 0; i < (unsigned int)(argc - 2); i++) {
+        for (j = 0; j < files[i].relocationTableSize; j++) {
+            RelocationTableEntry *rel = &files[i].relocTable[j];
+
+            // First find the symbol's final absolute address
+            int symbolAddr = findSymbolAddress(&combined, rel->label);
+			if (symbolAddr < 0) {
+				// The symbol isn’t in the global table, so assume it's a local label.
+				// For a text-section relocation, add the file’s textStartingLine to the immediate value.
+				int localOffset = combined.text[files[i].textStartingLine + rel->offset] & 0xFFFF;
+				symbolAddr = files[i].textStartingLine + localOffset;
+			}
+
+            /*
+             * Now figure out if this relocation offset refers to TEXT or DATA.
+             *   If rel->inst == ".fill", it means data offset
+             *   Otherwise, it’s likely an instruction offset (lw, sw, beq, etc.)
+             */
+            if (!strcmp(rel->inst, ".fill")) {
+                // data fix-up
+                unsigned int finalDataIndex = files[i].dataStartingLine + rel->offset;
+                // For a .fill of a label, we store the absolute address.
+                combined.data[finalDataIndex] = symbolAddr;
+            }
+            else {
+                // text fix-up
+                unsigned int finalInstrIndex = files[i].textStartingLine + rel->offset;
+                int instr = combined.text[finalInstrIndex];
+
+                if (!strcmp(rel->inst, "beq")) {
+                    // beq offset = symbolAddr - (PC+1)
+                    int offset = symbolAddr - ((int)finalInstrIndex + 1);
+                    // Clear old 16 bits, insert offset
+                    instr &= 0xFFFF0000;
+                    instr |= (offset & 0xFFFF);
+                }
+                else if (!strcmp(rel->inst, "lw") || !strcmp(rel->inst, "sw")) {
+                    // place absolute address in bottom 16 bits
+                    instr &= 0xFFFF0000;
+                    instr |= (symbolAddr & 0xFFFF);
+                }
+                // else handle more instructions if needed
+
+                combined.text[finalInstrIndex] = instr;
+            }
+        }
+    }
+
+    // 5) Insert "Stack" label at first free location after text & data
+    {
+        const char *stackLabel = "Stack";
+        // check if it's already defined
+        for (unsigned int k = 0; k < combined.symbolTableSize; k++) {
+            if (!strcmp(combined.symbolTable[k].label, stackLabel)) {
+                printf("error: 'Stack' label already defined\n");
+                exit(1);
+            }
+        }
+        // add it
+        strcpy(combined.symbolTable[combined.symbolTableSize].label, stackLabel);
+        combined.symbolTable[combined.symbolTableSize].location = 'D'; 
+        combined.symbolTable[combined.symbolTableSize].offset = combined.dataSize;
+        combined.symbolTableSize++;
+    }
+
+    // 6) Write out final machine code
+    //    text instructions first, then data
+    for (i = 0; i < combined.textSize; i++) {
+        printHexToFile(outFilePtr, combined.text[i]);
+    }
+    for (i = 0; i < combined.dataSize; i++) {
+        printHexToFile(outFilePtr, combined.data[i]);
+    }
+
+    fclose(outFilePtr);
+    return 0;
 } // main
 
 // Prints a machine code word in the proper hex format to the file

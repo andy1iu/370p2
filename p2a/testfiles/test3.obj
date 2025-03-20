@@ -1,0 +1,12 @@
+2 2 3 4
+0x00AA0002
+0x00A20000
+0x00000000
+0x00000000
+LJ D 0
+BR U 0
+LBJ U 0
+0 lw LJ
+1 lw BR
+0 .fill BR
+1 .fill LBJ

@@ -1,0 +1,21 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Project 2a",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/assembler",
+            "args": [
+                "testing.as",
+                "output.obj"
+            ],
+            "stopAtEntry": true,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb",
+            "preLaunchTask": "C/C++: make assembler"
+        }
+    ]
+  }
